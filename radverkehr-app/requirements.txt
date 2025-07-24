@@ -1,6 +1,4 @@
-
-\f0\fs24 \cf0 streamlit\
-pandas\
-folium\
-streamlit-folium\
-}
+streamlit
+pandas
+folium
+streamlit-folium
