@@ -86,3 +86,6 @@ for _, row in df_filtered.iterrows():
 
 # 🔹 Karte anzeigen
 st_folium(m, width=1000, height=600)
+
+
+st.write(f"🔍 Anzahl Einträge für Heatmap: {len(heat_data)}")
