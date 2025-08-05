@@ -13,10 +13,6 @@ def load_data():
 
 df = load_data()
 
-st.sidebar.header("Filter")
-min_rain = st.sidebar.slider("Mindestniederschlag (mm)", 0.0, 10.0, 0.0, 0.1)
-date_range = st.sidebar.date_input("Datum auswählen", [df["Datum"].min(), df["Datum"].max()])
-
 mask = (
     (df["Niederschlag_mm"] >= min_rain) &
     (df["Datum"] >= pd.to_datetime(date_range[0])) &
