@@ -31,3 +31,6 @@ HeatMap(heat_data, radius=15, max_zoom=13).add_to(m)
 st.title("🚲 Fahrradbewegung in Münster in Abhängigkeit vom Wetter")
 st.write(f"{len(df_filtered)} Datenpunkte ausgewählt")
 st_folium(m, width=1000, height=600)
+
+# Koordinaten laden
+stations_coords = pd.read_csv("stations_coords.csv")
