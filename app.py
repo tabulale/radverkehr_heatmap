@@ -53,36 +53,50 @@ st.title("🚲 Fahrradbewegung in Münster in Abhängigkeit vom Wetter")
 st.write(f"Anzahl angezeigter Datenpunkte (Zeilen nach Filter): {len(df_filtered)}")
 
 # -------------------------------
-# Karte mit Heatmap + Marker (verdichtet, wenn nötig)
+# EIN Punkt pro Station
+# Intensität = Anteil der Zähldaten im aktuellen Filter
+#    = (Summe Zaehldaten im Filter) / (Stations-Gesamtsumme über gewählte Monate)
 # -------------------------------
-MAX_POINTS = 2000
-if len(df_filtered) > MAX_POINTS:
-    st.warning(f"⚠️ {len(df_filtered)} Punkte → Verdichtung pro Station")
-    df_map = (df_filtered
-              .groupby(["Station","lat","lon"], as_index=False)
-              .agg({"Zaehldaten_norm": "sum", "Zaehldaten": "sum"}))
-else:
-    # schon klein genug → trotzdem auf Stationsebene verdichten ist meist sinnvoll
-    df_map = (df_filtered
-              .groupby(["Station","lat","lon"], as_index=False)
-              .agg({"Zaehldaten_norm": "sum", "Zaehldaten": "sum"}))
 
-st.caption(f"🧮 Punkte auf Karte: {len(df_map)} (vorher {len(df_filtered)})")
+# 1) Stations-Gesamtsummen (unabhängig von Regen, aber nur gewählte Monate/Stationen)
+df_totals = (
+    df[(df["Monat"].isin(monate_sel)) & (df["Station"].isin(stationen_sel))]
+    .groupby(["Station", "lat", "lon"], as_index=False)["Zaehldaten"]
+    .sum()
+    .rename(columns={"Zaehldaten": "Zaehldaten_total"})
+)
 
+# 2) Summe im aktuellen Filter (mit Regenkategorie)
+df_subset = (
+    df_filtered
+    .groupby(["Station", "lat", "lon"], as_index=False)["Zaehldaten"]
+    .sum()
+    .rename(columns={"Zaehldaten": "Zaehldaten_subset"})
+)
+
+# 3) Mergen + Anteil berechnen (0..1)
+df_map = df_totals.merge(df_subset, on=["Station","lat","lon"], how="left")
+df_map["Zaehldaten_subset"] = df_map["Zaehldaten_subset"].fillna(0)
+df_map["intensity"] = (df_map["Zaehldaten_subset"] / df_map["Zaehldaten_total"]).clip(0, 1)
+
+st.caption(f"🧮 Punkte auf Karte (1 pro Station): {len(df_map)}")
+
+# 4) Karte rendern
 m = folium.Map(location=[51.96, 7.62], zoom_start=12)
 
-# Heatmap
-heat_data = df_map[["lat","lon","Zaehldaten_norm"]].dropna().values.tolist()
+# Heatmap (Gewicht = intensity)
+heat_data = df_map[["lat","lon","intensity"]].dropna().values.tolist()
 if heat_data:
-    HeatMap(heat_data, radius=20, blur=18, max_zoom=13).add_to(m)
+    HeatMap(heat_data, radius=15, blur=12, max_zoom=13).add_to(m)
+    
 else:
     st.warning("⚠️ Keine Heatmap-Daten für die aktuelle Filterwahl gefunden.")
 
-# Marker (Radius gedeckelt)
+# Marker (Radius aus intensity, gedeckelt & gut skalierend)
 for _, row in df_map.dropna(subset=["lat","lon"]).iterrows():
-    norm = float(row.get("Zaehldaten_norm", 0.0))
-    norm_capped = max(0.0, min(norm, 1.0))
-    radius = 3 + 18 * norm_capped
+    intensity = float(row["intensity"])
+    radius = 4 + 18 * intensity  # 4..22 px
+
     folium.CircleMarker(
         location=[row["lat"], row["lon"]],
         radius=radius,
@@ -91,10 +105,12 @@ for _, row in df_map.dropna(subset=["lat","lon"]).iterrows():
         fill_opacity=0.6,
         popup=folium.Popup(
             f"<b>{row['Station']}</b><br>"
-            f"Zähldaten (summe, gefiltert): {int(row['Zaehldaten'])}<br>"
-            f"Normiert (summe, gefiltert): {norm:.2f}",
-            max_width=300
+            f"Gefilterte Summe: {int(row['Zaehldaten_subset'])}<br>"
+            f"Stations-Gesamt (Monate gewählt): {int(row['Zaehldaten_total'])}<br>"
+            f"Anteil im Filter: {intensity:.1%}",
+            max_width=320
         )
     ).add_to(m)
 
 st_folium(m, width=1000, height=600)
+
