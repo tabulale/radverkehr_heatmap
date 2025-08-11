@@ -7,85 +7,92 @@ from streamlit_folium import st_folium
 st.set_page_config(layout="wide")
 
 # -------------------------------
-# 🔹 Daten laden
+# Daten laden (neue Datei!)
 # -------------------------------
 @st.cache_data
 def load_data():
-    return pd.read_csv("df_heatmap_ready.csv", parse_dates=["Datum"])
+    # df_months_long hat KEIN Datum, sondern Monat & Kategorien
+    df = pd.read_csv("df_months_long.csv")
+    # Sicherheit: Kategorien als string
+    df["Niederschlag_group"] = df["Niederschlag_group"].astype(str)
+    df["Monat"] = df["Monat"].astype(str)
+    return df
 
 df = load_data()
 
 # -------------------------------
-# 🔹 Koordinaten laden
-# -------------------------------
-stations_coords = pd.read_csv("stations_coords.csv")
-
-# -------------------------------
-# 🔹 Sidebar mit Filteroptionen
+# Sidebar Filter
 # -------------------------------
 st.sidebar.title("Filter")
 
-regen_kategorie = st.sidebar.selectbox(
-    "Wähle Niederschlagskategorie",
-    [
-        "Alle",
-        "Kein Regen (0 mm)",
-        "Leichter Regen (0–1 mm)",
-        "Mäßiger Regen (1–5 mm)",
-        "Starker Regen (>5 mm)"
-    ]
-)
+regen_opts = ["Alle"] + sorted(df["Niederschlag_group"].dropna().unique().tolist())
+regen_kategorie = st.sidebar.selectbox("Niederschlagskategorie", regen_opts, index=0)
+
+monate_opts = sorted(df["Monat"].dropna().unique().tolist(),
+                     key=lambda m: ["January","February","March","April","May","June","July",
+                                    "August","September","October","November","December"].index(m)
+                     if m in ["January","February","March","April","May","June","July",
+                              "August","September","October","November","December"] else 99)
+monate_sel = st.sidebar.multiselect("Monat", monate_opts, default=monate_opts)
+
+stationen_opts = sorted(df["Station"].dropna().unique().tolist())
+stationen_sel = st.sidebar.multiselect("Station(en)", stationen_opts, default=stationen_opts)
 
 # -------------------------------
-# 🔹 Filterlogik anwenden
+# Filter anwenden
 # -------------------------------
-if regen_kategorie == "Kein Regen (0 mm)":
-    df_filtered = df[df["Niederschlag_mm"] == 0]
-elif regen_kategorie == "Leichter Regen (0–1 mm)":
-    df_filtered = df[(df["Niederschlag_mm"] > 0) & (df["Niederschlag_mm"] <= 1)]
-elif regen_kategorie == "Mäßiger Regen (1–5 mm)":
-    df_filtered = df[(df["Niederschlag_mm"] > 1) & (df["Niederschlag_mm"] <= 5)]
-elif regen_kategorie == "Starker Regen (>5 mm)":
-    df_filtered = df[df["Niederschlag_mm"] > 5]
-else:
-    df_filtered = df.copy()
+df_filtered = df.copy()
+if regen_kategorie != "Alle":
+    df_filtered = df_filtered[df_filtered["Niederschlag_group"] == regen_kategorie]
 
-# -------------------------------
-# 🔹 Titel & Info
-# -------------------------------
+if monate_sel:
+    df_filtered = df_filtered[df_filtered["Monat"].isin(monate_sel)]
+
+if stationen_sel:
+    df_filtered = df_filtered[df_filtered["Station"].isin(stationen_sel)]
+
 st.title("🚲 Fahrradbewegung in Münster in Abhängigkeit vom Wetter")
 st.write(f"Anzahl angezeigter Datenpunkte: {len(df_filtered)}")
 
 # -------------------------------
-# 🔹 Karte erzeugen & befüllen
+# Karte mit Heatmap + Marker
 # -------------------------------
 m = folium.Map(location=[51.96, 7.62], zoom_start=12)
 
-# 🔹 Heatmap Layer
-heat_data = [
-    [row["lat"], row["lon"], row["Zaehldaten"]]
-    for _, row in df_filtered.iterrows()
-    if pd.notna(row["lat"]) and pd.notna(row["lon"])
-]
-HeatMap(heat_data, radius=15, max_zoom=13).add_to(m)
+# HeatMap: Intensität = normalisierte Zähldaten
+heat_data = (
+    df_filtered[["lat", "lon", "Zaehldaten_norm"]]
+    .dropna()
+    .values
+    .tolist()
+)
 
-# 🔹 Marker Layer mit Tooltips
-for _, row in df_filtered.iterrows():
-    if pd.notna(row['lat']) and pd.notna(row['lon']):
-        folium.CircleMarker(
-            location=[row['lat'], row['lon']],
-            radius=max(row['Zaehldaten'] / 1000, 2),
-            color='blue',
-            fill=True,
-            fill_opacity=0.6,
-            popup=folium.Popup(
-                f"<b>{row['Station']}</b><br>{int(row['Zaehldaten'])} Fahrräder<br>{row['Datum'].date()}<br>{row['Niederschlag_mm']} mm Regen",
-                max_width=300
-            )
-        ).add_to(m)
+if heat_data:
+    HeatMap(heat_data, radius=20, max_zoom=13).add_to(m)
+else:
+    st.warning("⚠️ Keine Heatmap-Daten für die aktuelle Filterwahl gefunden.")
 
-# 🔹 Karte anzeigen
+# Marker mit Popups: zeige absolute & normalisierte Werte, Monat, Regen-Gruppe
+for _, row in df_filtered.dropna(subset=["lat","lon"]).iterrows():
+    norm = float(row.get("Zaehldaten_norm", 0.0))
+    radius = max(norm * 25, 3)  # visuelles Scaling für Marker
+    folium.CircleMarker(
+        location=[row["lat"], row["lon"]],
+        radius=radius,
+        color='blue',
+        fill=True,
+        fill_opacity=0.6,
+        popup=folium.Popup(
+            f"<b>{row['Station']}</b><br>"
+            f"Monat: {row.get('Monat','-')}<br>"
+            f"Wetter: {row.get('Niederschlag_group','-')}<br>"
+            f"Zähldaten (absolut): {int(row['Zaehldaten'])}<br>"
+            f"Zähldaten (normalisiert): {norm:.1%}",
+            max_width=300
+        )
+    ).add_to(m)
+
 st_folium(m, width=1000, height=600)
 
-
-st.write(f"🔍 Anzahl Einträge für Heatmap: {len(heat_data)}")
+# Debug-Zeile (optional ein/aus)
+# st.write(f"🔍 Heatmap-Punkte: {len(heat_data)} | Stationen: {len(stationen_sel)} | Monate: {len(monate_sel)}")
