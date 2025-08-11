@@ -11,8 +11,8 @@ st.set_page_config(layout="wide")
 # -------------------------------
 @st.cache_data
 def load_data():
-    # df_months_long hat KEIN Datum, sondern Monat & Kategorien
-    df = pd.read_csv("df_months_long.csv")
+    import pandas as pd
+    return pd.read_parquet("df_months_long.parquet")
     # Sicherheit: Kategorien als string
     df["Niederschlag_group"] = df["Niederschlag_group"].astype(str)
     df["Monat"] = df["Monat"].astype(str)
