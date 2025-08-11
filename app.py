@@ -6,7 +6,7 @@ from streamlit_folium import st_folium
 import os
 
 st.set_page_config(layout="wide")
-st.caption("🧩 Code-Version: v2.3 (Station-strip + Debug + Sanity-Checks)")
+st.caption("🧩 Code-Version: v2.4 (Dummy-Koordinate erkennen + Missing-Report)")
 
 # -------------------------------
 # Daten laden (nur Parquet!)
@@ -14,13 +14,38 @@ st.caption("🧩 Code-Version: v2.3 (Station-strip + Debug + Sanity-Checks)")
 @st.cache_data
 def load_data():
     df = pd.read_parquet("df_months_long.parquet")
-    # Spalten als String sichern
-    if "Niederschlag_group" in df.columns:
-        df["Niederschlag_group"] = df["Niederschlag_group"].astype(str)
-    if "Monat" in df.columns:
-        df["Monat"] = df["Monat"].astype(str)
-    # WICHTIG: Stationsnamen sauber machen (führt sonst zu Merge-Mismatches)
+
+    # Grund-Cleaning
+    for c in ["Niederschlag_group","Monat","Station"]:
+        if c in df.columns:
+            df[c] = df[c].astype(str)
     df["Station"] = df["Station"].astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
+
+    # lat/lon sauber und numerisch
+    df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
+    df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
+    # etwas runden, um winzige Fluktuationen zu glätten
+    df["lat"] = df["lat"].round(6)
+    df["lon"] = df["lon"].round(6)
+
+    # --- WICHTIG: Dominante (wahrscheinliche) Dummy-Koordinate erkennen ---
+    # Wir zählen Paare (lat, lon) und nehmen das häufigste Paar als Dummy,
+    # wenn es "ungewöhnlich" häufig ist (hier >30% aller Zeilen).
+    pair_counts = (
+        df.dropna(subset=["lat","lon"])
+          .value_counts(subset=["lat","lon"])
+          .reset_index(name="n")
+          .sort_values("n", ascending=False)
+    )
+    if not pair_counts.empty and pair_counts.loc[0, "n"] > 0.30 * len(df):
+        dummy_lat = pair_counts.loc[0, "lat"]
+        dummy_lon = pair_counts.loc[0, "lon"]
+        df["is_dummy_coord"] = (df["lat"].eq(dummy_lat) & df["lon"].eq(dummy_lon))
+        # Dummy-Koordinaten als fehlend markieren
+        df.loc[df["is_dummy_coord"], ["lat","lon"]] = pd.NA
+    else:
+        df["is_dummy_coord"] = False
+
     return df
 
 df = load_data()
@@ -82,17 +107,17 @@ if not stationen_sel:
     st.stop()
 
 # -------------------------------
-# EIN Punkt pro Station (robust)
+# EIN Punkt pro Station (mit Koordinaten-Check)
 # -------------------------------
 
-# 0) Lookup Koordinaten (nach Cleaning)
+# Koordinaten-Lookup NUR aus gültigen (nicht-dummy) Koordinaten
 stations_lookup = (
     df.dropna(subset=["Station","lat","lon"])
-      .sort_values(["Station"])
+      .sort_values("Station")
       .drop_duplicates(subset=["Station"])[["Station","lat","lon"]]
 )
 
-# 1) Gesamtsummen pro Station (Monate/Stationen-Filter; Regen egal)
+# 1) Totals (Monate/Stationen-Filter)
 mask_total = df["Station"].isin(stationen_sel)
 if "Monat" in df.columns and monate_sel:
     mask_total &= df["Monat"].isin(monate_sel)
@@ -104,7 +129,7 @@ df_totals = (
       .rename(columns={metr_col: "Zaehldaten_total"})
 )
 
-# 2) Summe im aktuellen Filter (inkl. Regen)
+# 2) Subset (inkl. Regen)
 df_subset = (
     df_filtered
       .groupby("Station", as_index=False)[metr_col]
@@ -112,25 +137,23 @@ df_subset = (
       .rename(columns={metr_col: "Zaehldaten_subset"})
 )
 
-# 3) Mergen (nur nach Station!) + Koordinaten anfügen
+# 3) Merge + Intensität
 df_map = (
     df_totals
       .merge(df_subset, on="Station", how="left")
       .merge(stations_lookup, on="Station", how="left")
 )
 
-# Fehlende Werte & Division-by-zero absichern
 df_map["Zaehldaten_subset"] = df_map["Zaehldaten_subset"].fillna(0)
 df_map["Zaehldaten_total"]  = df_map["Zaehldaten_total"].fillna(0)
-
 denom = df_map["Zaehldaten_total"].replace(0, pd.NA)
 df_map["intensity"] = (df_map["Zaehldaten_subset"] / denom).fillna(0).clip(0, 1)
 
-# Sanity: Erwartet = Anzahl gewählter Stationen ∩ Stationen mit Koordinaten
+# Erwartete vs. vorhandene Punkte
 expected = len(set(stationen_sel) & set(stations_lookup["Station"]))
 st.caption(f"🧮 Punkte auf Karte (Zeilen df_map): {len(df_map)} · Erwartet ≈ {expected}")
 
-# Kurze Summary
+# Summary
 sum_subset = int(df_map["Zaehldaten_subset"].sum())
 sum_total  = int(df_map["Zaehldaten_total"].sum())
 anteil = (sum_subset / sum_total * 100) if sum_total > 0 else 0
@@ -140,8 +163,10 @@ st.success(f"Σ {metr_wahl}: {sum_subset:,} im aktuellen Filter · Anteil {antei
 # Karte
 # -------------------------------
 valid_map = df_map.dropna(subset=["lat","lon"])
+missing_coords = sorted(set(df_map["Station"]) - set(valid_map["Station"]))
+
 if valid_map.empty:
-    st.warning("Keine Koordinaten für die gewählten Stationen gefunden.")
+    st.warning("Keine gültigen Koordinaten gefunden. Bitte Koordinaten im Datensatz prüfen.")
     st.stop()
 
 center = [valid_map["lat"].mean(), valid_map["lon"].mean()]
@@ -150,8 +175,6 @@ m = folium.Map(location=center, zoom_start=12)
 heat_data = valid_map[["lat","lon","intensity"]].values.tolist()
 if heat_data:
     HeatMap(heat_data, radius=15, blur=12, max_zoom=13).add_to(m)
-else:
-    st.warning("⚠️ Keine Heatmap-Daten für die aktuelle Filterwahl gefunden.")
 
 for _, row in valid_map.iterrows():
     intensity = float(row["intensity"])
@@ -174,15 +197,9 @@ for _, row in valid_map.iterrows():
 st_folium(m, width=1000, height=600)
 
 # -------------------------------
-# Debug: Woran könnte es hängen?
+# Debug / Datenqualität
 # -------------------------------
-with st.expander("Sanity-Check / Debug"):
-    st.write("Gewählte Stationen:", len(stationen_sel))
-    st.write("Eindeutige Stationen in df_totals:", df_totals["Station"].nunique(), " · Zeilen:", len(df_totals))
-    st.write("Eindeutige Stationen in df_subset:", df_subset["Station"].nunique(), " · Zeilen:", len(df_subset))
-    st.write("Eindeutige Stationen im stations_lookup:", stations_lookup["Station"].nunique(), " · Zeilen:", len(stations_lookup))
-    st.write("Eindeutige Stationen in df_map:", df_map["Station"].nunique(), " · Zeilen:", len(df_map))
-    # Zeige 10 Stationen mit 'repr', um versteckte Leerzeichen zu sehen
-    sample_names = df["Station"].dropna().unique().tolist()[:10]
-    st.write("Beispiel-Stationstrings (repr):", [repr(s) for s in sample_names])
-    st.dataframe(df_map[["Station","lat","lon","Zaehldaten_subset","Zaehldaten_total","intensity"]].sort_values("Station"))
+with st.expander("Datenqualität: Koordinaten"):
+    st.write("Eindeutige Stationen mit gültigen Koordinaten:", valid_map["Station"].nunique())
+    st.write("Stationen ohne gültige Koordinaten (bitte im Parquet korrigieren):", missing_coords)
+    st.dataframe(valid_map[["Station","lat","lon","Zaehldaten_subset","Zaehldaten_total","intensity"]].sort_values("Station"))
